@@ -1,54 +1,154 @@
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const headers = { 
+    const headers = {
       'Access-Control-Allow-Origin': '*',
       'Content-Type': 'application/json'
     };
 
-    try {
-      const query = url.searchParams.get('q');
-      if (!query) throw new Error('Missing search query');
+    // Health check endpoint
+    if (url.pathname === '/health') {
+      return new Response('OK', { headers, status: 200 });
+    }
 
-      // Fetch mobile YouTube with modern user agent
-      const mobileUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
-      const ytResponse = await fetch(`https://m.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
-        headers: { 'User-Agent': mobileUA }
-      });
-      const html = await ytResponse.text();
+    // Main search endpoint
+    if (url.pathname === '/search') {
+      try {
+        const query = url.searchParams.get('q');
+        if (!query) throw new Error('Missing search query');
 
-      // Try multiple JSON extraction methods
-      let data;
-      const initialDataMatch = html.match(/var ytInitialData = (.*?);<\/script>/);
-      const playerResponseMatch = html.match(/ytInitialPlayerResponse = (.*?);var/);
-
-      if (initialDataMatch) data = JSON.parse(initialDataMatch[1]);
-      else if (playerResponseMatch) data = JSON.parse(playerResponseMatch[1]);
-      else throw new Error('YouTube data pattern not found');
-
-      // Modern video extraction
-      const videos = [];
-      const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents || [];
-      
-      for (const item of contents) {
-        if (item.videoRenderer?.videoId) {
-          videos.push({
-            id: item.videoRenderer.videoId,
-            title: item.videoRenderer.title?.runs?.[0]?.text || 'No title',
-            channel: item.videoRenderer.ownerText?.runs?.[0]?.text || 'Unknown',
-            thumbnail: `https://i.ytimg.com/vi/${item.videoRenderer.videoId}/hqdefault.jpg`
-          });
+        // Step 1: Fetch with mobile user agent
+        const { html, finalUrl } = await fetchYouTubeMobile(query);
+        
+        // Step 2: Try multiple parsing methods
+        const videos = await parseYouTubeResults(html);
+        
+        if (videos.length === 0) {
+          // Fallback to desktop site if mobile fails
+          const desktopHtml = await fetchYouTubeDesktop(query);
+          videos = await parseYouTubeResults(desktopHtml);
+          
+          if (videos.length === 0) {
+            throw new Error('No videos found after trying all methods');
+          }
         }
+
+        return new Response(JSON.stringify({ videos }), { headers });
+
+      } catch (error) {
+        return new Response(JSON.stringify({ 
+          error: error.message,
+          videos: [] 
+        }), { 
+          headers,
+          status: 500 
+        });
       }
+    }
 
-      if (videos.length === 0) throw new Error('No videos found');
-      return new Response(JSON.stringify({ videos }), { headers });
+    return new Response(JSON.stringify({ videos: [] }), { 
+      headers,
+      status: 404 
+    });
+  }
+}
 
-    } catch (error) {
-      return new Response(JSON.stringify({ 
-        error: error.message,
-        videos: [] 
-      }), { headers, status: 500 });
+// ======================
+// Helper Functions
+// ======================
+
+async function fetchYouTubeMobile(query) {
+  const userAgents = [
+    'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
+  ];
+  
+  const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+  
+  const response = await fetch(`https://m.youtube.com/results?search_query=${encodeURIComponent(query)}&hl=en`, {
+    headers: {
+      'User-Agent': randomAgent,
+      'Accept-Language': 'en-US,en;q=0.9'
+    }
+  });
+  
+  return {
+    html: await response.text(),
+    finalUrl: response.url
+  };
+}
+
+async function fetchYouTubeDesktop(query) {
+  const response = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`);
+  return await response.text();
+}
+
+async function parseYouTubeResults(html) {
+  const videos = [];
+  
+  // Method 1: Modern ytInitialData pattern
+  const initialDataMatch = html.match(/ytInitialData\s*=\s*({.*?});<\/script>/s);
+  if (initialDataMatch) {
+    try {
+      const data = JSON.parse(initialDataMatch[1]);
+      findVideosDeep(data, videos);
+    } catch (e) {
+      console.error('InitialData parse error:', e.message);
     }
   }
-};
+  
+  // Method 2: Legacy pattern
+  if (videos.length === 0) {
+    const legacyMatch = html.match(/var ytInitialData\s*=\s*({.*?});/s);
+    if (legacyMatch) {
+      try {
+        const data = JSON.parse(legacyMatch[1]);
+        findVideosDeep(data, videos);
+      } catch (e) {
+        console.error('Legacy parse error:', e.message);
+      }
+    }
+  }
+  
+  // Method 3: Raw HTML scraping as last resort
+  if (videos.length === 0) {
+    const videoRegex = /"videoRenderer":\{"videoId":"([^"]+)".*?"title":\{"runs":\[\{"text":"([^"]+)".*?"ownerText":\{"runs":\[\{"text":"([^"]+)"/gs;
+    let match;
+    
+    while ((match = videoRegex.exec(html)) !== null) {
+      videos.push({
+        id: match[1],
+        title: match[2].replace(/\\u([\dA-F]{4})/gi, (_, code) => 
+          String.fromCharCode(parseInt(code, 16))),
+        channel: match[3],
+        duration: 'N/A',
+        thumbnail: `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`
+      });
+    }
+  }
+  
+  return videos;
+}
+
+function findVideosDeep(obj, videos) {
+  if (!obj || typeof obj !== 'object') return;
+  
+  // Check if current object is a video
+  if (obj.videoRenderer?.videoId) {
+    const vid = obj.videoRenderer;
+    videos.push({
+      id: vid.videoId,
+      title: vid.title?.runs?.[0]?.text || vid.title?.simpleText || 'No title',
+      channel: vid.ownerText?.runs?.[0]?.text || vid.author?.text || 'Unknown',
+      duration: vid.lengthText?.simpleText || 'N/A',
+      thumbnail: `https://i.ytimg.com/vi/${vid.videoId}/hqdefault.jpg`
+    });
+  }
+  
+  // Recursively search through all object properties
+  for (const key in obj) {
+    if (typeof obj[key] === 'object') {
+      findVideosDeep(obj[key], videos);
+    }
+  }
+}
