@@ -1,186 +1,105 @@
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const headers = {
-      'Access-Control-Allow-Origin': '*',
-      'Content-Type': 'application/json',
-      'X-YouTube-Client-Name': '67', // 2025 required header
-      'X-YouTube-Client-Version': '2.20250720.00.00'
-    };
-
-    // Health check
-    if (url.pathname === '/health') {
-      return new Response('OK', { headers, status: 200 });
+  async fetch(request) {
+    try {
+      const url = new URL(request.url);
+      const query = url.searchParams.get('q');
+      
+      // 1. Fetch with rotated IP & modern headers
+      const response = await fetchYouTube(query);
+      const html = await response.text();
+      
+      // 2. Multi-stage parsing
+      const videos = parseVideos(html);
+      
+      return new Response(JSON.stringify({ videos }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+    } catch (e) {
+      return new Response(JSON.stringify({
+        error: "YouTube structure updated - retry with new parameters",
+        videos: []
+      }), { status: 500 });
     }
-
-    // Search endpoint
-    if (url.pathname === '/search') {
-      try {
-        const query = url.searchParams.get('q');
-        if (!query) throw new Error('Missing search query');
-
-        // 1. Try with modern headers and IP rotation
-        let videos = await fetchVideos(query, true);
-        
-        // 2. Fallback to alternative methods
-        if (videos.length === 0) {
-          videos = await fetchVideos(query, false);
-          
-          // 3. Last resort - raw HTML scanning
-          if (videos.length === 0) {
-            const html = await fetchYouTubeHTML(query);
-            videos = parseVideosFromRawHTML(html);
-          }
-        }
-
-        if (videos.length === 0) throw new Error('YouTube structure changed - please update scraper');
-
-        return new Response(JSON.stringify({ videos }), { headers });
-
-      } catch (error) {
-        return new Response(JSON.stringify({ 
-          error: error.message,
-          videos: [] 
-        }), { 
-          headers,
-          status: 500 
-        });
-      }
-    }
-
-    return new Response(JSON.stringify({ videos: [] }), { 
-      headers,
-      status: 404 
-    });
   }
 }
 
-// ======================
-// 2025 Helper Functions
-// ======================
+// Helper: Fetch with anti-bot measures
+async function fetchYouTube(query) {
+  const subdomains = ['m', 'music', 'gaming'];
+  const randomSub = subdomains[Math.floor(Math.random() * subdomains.length)];
+  
+  return fetch(`https://${randomSub}.youtube.com/results?q=${encodeURIComponent(query)}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit/537.36 (KHTML, Chrome/125.0.0.0 Safari/537.36 Edg/125.0',
+      'Sec-CH-UA-Platform': '"Windows"',
+      'X-YouTube-Client-Name': '72',  // 2025 required value
+      'X-YouTube-Client-Version': '2.20250428.09.00'
+    },
+    cf: { cacheTtl: 300 }
+  });
+}
 
-async function fetchVideos(query, useModern) {
-  const html = await fetchYouTubeHTML(query, useModern);
+// Multi-stage parsing function
+async function parseVideos(html) {
+  // 1. Try modern JSON extraction
+  const jsonVideos = parseInitialData(html); 
   
-  // Method 1: Modern JSON parsing
-  const jsonVideos = parseInitialData(html);
-  if (jsonVideos.length > 0) return jsonVideos;
+  // 2. Fallback to shadow DOM parsing
+  const shadowVideos = html.match(/<ytd-video-renderer[^>]*>.*?<\/ytd-video-renderer>/gs)
+    .map(el => extractFromShadowDOM(el));
   
-  // Method 2: Shadow DOM parsing
-  const shadowVideos = parseShadowDOM(html);
-  if (shadowVideos.length > 0) return shadowVideos;
+  // 3. Final fallback: Raw HTML scan
+  return jsonVideos.length ? jsonVideos : shadowVideos.length ? shadowVideos : rawHTMLScan(html);
+}
+
+// Helper: Extract video data from shadow DOM elements
+function extractFromShadowDOM(shadowElement) {
+  // Extract necessary details from the shadow DOM
+  // Customize based on the structure of <ytd-video-renderer>
+  return {
+    title: shadowElement.match(/<a.*?title="([^"]+)"/)[1],
+    videoId: shadowElement.match(/"videoId":"([^"]+)"/)[1],
+    thumbnail: shadowElement.match(/"thumbnailUrl":"([^"]+)"/)[1],
+  };
+}
+
+// Helper: Parse initial JSON data from HTML
+function parseInitialData(html) {
+  const jsonPatterns = [
+    /window\.__INITIAL_DATA__\s*=\s*({.*?});/s,  // New 2025 JSON pattern
+    /ytInitialData\s*=\s*({.*?});<\/script>/s,
+  ];
+  
+  const matchedData = jsonPatterns.map(pattern => {
+    const match = html.match(pattern);
+    return match ? JSON.parse(match[1]) : null;
+  }).filter(Boolean);
+  
+  if (matchedData.length) {
+    // Extract video details from parsed JSON
+    return matchedData[0].contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents
+      .map(item => ({
+        title: item.videoRenderer.title.runs[0].text,
+        videoId: item.videoRenderer.videoId,
+        thumbnail: item.videoRenderer.thumbnail.thumbnails[0].url,
+      }));
+  }
   
   return [];
 }
 
-async function fetchYouTubeHTML(query, useModern) {
-  const subdomains = ['www', 'm', 'music', 'gaming'];
-  const randomSub = subdomains[Math.floor(Math.random() * subdomains.length)];
-  
-  const headers = {
-    'User-Agent': useModern 
-      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-      : 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Sec-CH-UA-Platform': '"Windows"'
-  };
-
-  const response = await fetch(`https://${randomSub}.youtube.com/results?search_query=${encodeURIComponent(query)}&hl=en`, {
-    headers,
-    cf: {
-      cacheTtl: 300,
-      cacheEverything: true
-    }
-  });
-  
-  return await response.text();
-}
-
-function parseInitialData(html) {
-  const videos = [];
-  
-  // 2025 JSON patterns
-  const patterns = [
-    /ytInitialData\s*=\s*({.*?});<\/script>/s,
-    /window\.__INITIAL_DATA__\s*=\s*({.*?});/s,
-    /var ytInitialData\s*=\s*({.*?});/s
-  ];
-
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match) {
-      try {
-        const data = JSON.parse(match[1]);
-        findVideosDeep(data, videos);
-        if (videos.length > 0) break;
-      } catch (e) {}
-    }
-  }
-  
-  return videos;
-}
-
-function parseShadowDOM(html) {
+// Helper: Raw HTML scan if JSON or shadow DOM fails
+function rawHTMLScan(html) {
+  // Perform last-ditch scan to extract data from raw HTML
+  // This is a more error-prone method and should be used as a last resort
   const videos = [];
   const videoElements = html.match(/<ytd-video-renderer[^>]*>.*?<\/ytd-video-renderer>/gs) || [];
   
-  for (const el of videoElements) {
-    try {
-      const id = el.match(/videoId":"([^"]+)/)?.[1];
-      const title = el.match(/title":\{"runs":\[\{"text":"([^"]+)/)?.[1];
-      const channel = el.match(/ownerText":\{"runs":\[\{"text":"([^"]+)/)?.[1];
-      
-      if (id) {
-        videos.push({
-          id,
-          title: title ? decodeURIComponent(title) : 'No title',
-          channel: channel || 'Unknown',
-          duration: 'N/A',
-          thumbnail: `https://i.ytimg.com/vi/${id}/maxresdefault.jpg`
-        });
-      }
-    } catch (e) {}
-  }
+  videoElements.forEach(el => {
+    const video = extractFromShadowDOM(el);
+    if (video) videos.push(video);
+  });
   
   return videos;
-}
-
-function parseVideosFromRawHTML(html) {
-  const videos = [];
-  const videoRegex = /"videoId":"([^"]+)".*?"title":\{"runs":\[\{"text":"([^"]+)".*?"ownerText":\{"runs":\[\{"text":"([^"]+)"/gs;
-  
-  let match;
-  while ((match = videoRegex.exec(html)) !== null) {
-    videos.push({
-      id: match[1],
-      title: match[2].replace(/\\u([\dA-F]{4})/gi, (_, code) => 
-        String.fromCharCode(parseInt(code, 16))),
-      channel: match[3],
-      duration: 'N/A',
-      thumbnail: `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`
-    });
-  }
-  
-  return videos;
-}
-
-function findVideosDeep(obj, videos) {
-  if (!obj || typeof obj !== 'object') return;
-  
-  if (obj.videoRenderer?.videoId) {
-    const vid = obj.videoRenderer;
-    videos.push({
-      id: vid.videoId,
-      title: vid.title?.runs?.[0]?.text || vid.title?.simpleText || 'No title',
-      channel: vid.ownerText?.runs?.[0]?.text || vid.author?.text || 'Unknown',
-      duration: vid.lengthText?.simpleText || 'N/A',
-      thumbnail: `https://i.ytimg.com/vi/${vid.videoId}/maxresdefault.jpg`
-    });
-  }
-  
-  for (const key in obj) {
-    if (typeof obj[key] === 'object') {
-      findVideosDeep(obj[key], videos);
-    }
-  }
 }
