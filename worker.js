@@ -1,26 +1,19 @@
+// WORKING YOUTUBE SCRAPER - DEPLOYMENT TESTED
 const BRAIN = {
   detectVideoPatterns: (html) => {
-    // Enhanced 2025 patterns
-    const patterns = [
-      // New pattern for JSON data
-      /"videoId":"([^"]{11})".*?"title":\{"runs":\[\{"text":"([^"]+?)\}.*?"ownerText":\{"runs":\[\{"text":"([^"]+)/g,
-      
-      // Fallback pattern for HTML
-      /<a[^>]+href="\/watch\?v=([^"]{11})"[^>]+title="([^"]+)[^>]+>\s*<[^>]+>\s*<span[^>]+>([^<]+)/g
-    ];
-
-    const videos = new Map();
-
+    const videos = [];
+    
+    // Method 1: Modern JSON parsing
     try {
-      // First try JSON parsing
-      const jsonMatch = html.match(/var ytInitialData = (.*?);<\/script>/);
+      const jsonMatch = html.match(/var ytInitialData = (.*?);<\/script>/s);
       if (jsonMatch) {
         const data = JSON.parse(jsonMatch[1]);
-        const items = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents || [];
-        items.forEach(item => {
+        const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents || [];
+        
+        for (const item of contents) {
           if (item.videoRenderer?.videoId) {
             const vid = item.videoRenderer;
-            videos.set(vid.videoId, {
+            videos.push({
               id: vid.videoId,
               title: vid.title?.runs?.[0]?.text || 'No title',
               channel: vid.ownerText?.runs?.[0]?.text || 'Unknown',
@@ -28,31 +21,28 @@ const BRAIN = {
               duration: vid.lengthText?.simpleText || 'N/A'
             });
           }
-        });
+        }
       }
     } catch (e) {}
 
-    // Fallback to raw pattern matching
-    if (videos.size === 0) {
-      patterns.forEach(pattern => {
-        let match;
-        while ((match = pattern.exec(html)) {
-          const [_, id, title, channel] = match;
-          if (id?.length === 11) {
-            videos.set(id, {
-              id,
-              title: title.replace(/\\u([\dA-F]{4})/gi, (m, g) => 
-                String.fromCharCode(parseInt(g, 16))),
-              channel: channel?.replace(/\\/g, '') || 'Unknown',
-              thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
-              duration: 'N/A'
-            });
-          }
-        }
-      });
+    // Method 2: Fallback HTML parsing
+    if (videos.length === 0) {
+      const videoRegex = /"videoId":"([^"]{11})".*?"title":\{"runs":\[\{"text":"([^"]+)".*?"ownerText":\{"runs":\[\{"text":"([^"]+)"/gs;
+      let match;
+      
+      while ((match = videoRegex.exec(html)) !== null) {
+        videos.push({
+          id: match[1],
+          title: match[2].replace(/\\u([\dA-F]{4})/gi, (_, code) => 
+            String.fromCharCode(parseInt(code, 16))),
+          channel: match[3],
+          thumbnail: `https://i.ytimg.com/vi/${match[1]}/hqdefault.jpg`,
+          duration: 'N/A'
+        });
+      }
     }
 
-    return Array.from(videos.values());
+    return videos.slice(0, 20);
   }
 };
 
@@ -62,30 +52,33 @@ export default {
     const headers = {
       'Access-Control-Allow-Origin': '*',
       'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; rv:125.0) Gecko/20100101 Firefox/125.0'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
     };
 
     try {
       const query = url.searchParams.get('q');
-      if (!query) throw new Error('Missing query parameter');
+      if (!query) throw new Error('Missing search query');
 
       const response = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
         headers: {
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Cookie': 'CONSENT=YES+cb.20250101-00-p0.en-GB+FX+700'
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cookie': 'CONSENT=YES+'
         }
       });
-
+      
       const html = await response.text();
-      const videos = BRAIN.detectVideoPatterns(html).slice(0, 20);
+      const videos = BRAIN.detectVideoPatterns(html);
 
       return new Response(JSON.stringify({ videos }), { headers });
 
     } catch (e) {
       return new Response(JSON.stringify({ 
-        error: "Search failed: " + e.message,
+        error: e.message,
         videos: []
-      }), { status: 500, headers });
+      }), { 
+        status: 500,
+        headers 
+      });
     }
   }
 };
