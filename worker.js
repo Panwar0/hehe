@@ -17,16 +17,15 @@ export default {
         const query = url.searchParams.get('q');
         if (!query) throw new Error('Missing search query');
 
-        // Step 1: Fetch with mobile user agent
-        const { html, finalUrl } = await fetchYouTubeMobile(query);
+        // First try mobile version
+        let videos = [];
+        const mobileResult = await fetchAndParseYouTube(query, true);
+        videos = mobileResult.videos;
         
-        // Step 2: Try multiple parsing methods
-        const videos = await parseYouTubeResults(html);
-        
+        // Fallback to desktop if mobile fails
         if (videos.length === 0) {
-          // Fallback to desktop site if mobile fails
-          const desktopHtml = await fetchYouTubeDesktop(query);
-          videos = await parseYouTubeResults(desktopHtml);
+          const desktopResult = await fetchAndParseYouTube(query, false);
+          videos = desktopResult.videos;
           
           if (videos.length === 0) {
             throw new Error('No videos found after trying all methods');
@@ -57,33 +56,38 @@ export default {
 // Helper Functions
 // ======================
 
-async function fetchYouTubeMobile(query) {
+async function fetchAndParseYouTube(query, useMobile) {
+  const html = await fetchYouTube(query, useMobile);
+  const videos = parseYouTubeResults(html);
+  return { html, videos };
+}
+
+async function fetchYouTube(query, useMobile) {
+  const baseUrl = useMobile 
+    ? 'https://m.youtube.com' 
+    : 'https://www.youtube.com';
+
   const userAgents = [
     'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
   ];
   
-  const randomAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
-  
-  const response = await fetch(`https://m.youtube.com/results?search_query=${encodeURIComponent(query)}&hl=en`, {
-    headers: {
-      'User-Agent': randomAgent,
-      'Accept-Language': 'en-US,en;q=0.9'
-    }
+  const headers = {
+    'Accept-Language': 'en-US,en;q=0.9'
+  };
+
+  if (useMobile) {
+    headers['User-Agent'] = userAgents[Math.floor(Math.random() * userAgents.length)];
+  }
+
+  const response = await fetch(`${baseUrl}/results?search_query=${encodeURIComponent(query)}`, {
+    headers
   });
   
-  return {
-    html: await response.text(),
-    finalUrl: response.url
-  };
-}
-
-async function fetchYouTubeDesktop(query) {
-  const response = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`);
   return await response.text();
 }
 
-async function parseYouTubeResults(html) {
+function parseYouTubeResults(html) {
   const videos = [];
   
   // Method 1: Modern ytInitialData pattern
