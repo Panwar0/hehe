@@ -1,11 +1,10 @@
-// YouTube Scraper Worker with Pagination Support
-const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'; // Current 2025 key
-const CLIENT_VERSION = '2.20250101.00.00';
+// YouTube Scraper Worker with Continuation Fix
+const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+const CLIENT_VERSION = '2.20250720.00.00';
 
 const parseVideoResults = (data) => {
-  const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents[0]?.itemSectionRenderer?.contents || [];
-  const continuation = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.continuations?.[0]?.nextContinuationData?.continuation;
-
+  // Extract videos
+  const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents || [];
   const videos = contents.filter(item => item.videoRenderer).map(item => {
     const vid = item.videoRenderer;
     return {
@@ -16,6 +15,12 @@ const parseVideoResults = (data) => {
       thumbnail: vid.thumbnail?.thumbnails?.[0]?.url || `https://i.ytimg.com/vi/${vid.videoId}/hqdefault.jpg`
     };
   });
+
+  // Extract continuation token from multiple possible locations
+  const continuation = 
+    data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.continuations?.[0]?.nextContinuationData?.continuation ||
+    data.continuationContents?.itemSectionContinuation?.continuation ||
+    data.onResponseReceivedCommands?.[0]?.appendContinuationItemsAction?.continuationItems?.[0]?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
 
   return { videos, continuation };
 };
@@ -28,7 +33,6 @@ const searchYouTube = async (requestBody) => {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
     },
     body: JSON.stringify({
-      ...requestBody,
       context: {
         client: {
           hl: 'en',
@@ -36,7 +40,8 @@ const searchYouTube = async (requestBody) => {
           clientName: 'WEB',
           clientVersion: CLIENT_VERSION
         }
-      }
+      },
+      ...requestBody
     })
   });
 
@@ -60,15 +65,9 @@ export default {
         throw new Error('Missing search query or continuation token');
       }
 
-      let requestBody;
-      if (continuation) {
-        requestBody = { continuation };
-      } else {
-        requestBody = { 
-          query,
-          params: 'EgIQAQ%3D%3D' // Filters to only videos
-        };
-      }
+      const requestBody = continuation 
+        ? { continuation }
+        : { query, params: 'EgIQAQ%3D%3D' };
 
       const { videos, continuation: newContinuation } = await searchYouTube(requestBody);
 
