@@ -1,4 +1,4 @@
-// FINAL WORKING VERSION
+// WORKING YouTube Scraper for Cloudflare Workers
 const BRAIN = {
   detectVideoPatterns: (html) => {
     const videoSignatures = [
@@ -24,7 +24,7 @@ const BRAIN = {
 
       ids.forEach((vid, i) => {
         if (vid.length === 11) {
-          results.add(JSON.stringify({
+          const videoData = {
             id: vid,
             title: decodeURIComponent(titles[i] || 'N/A')
               .replace(/\\u[\dA-F]{4}/gi, m => 
@@ -32,12 +32,13 @@ const BRAIN = {
             channel: (channels[i] || '').replace(/\\/g, '') || 'Unknown',
             thumbnail: `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
             duration: 'N/A'
-          }));
+          };
+          results.add(JSON.stringify(videoData));
         }
       });
     }
 
-    return [...results].map(JSON.parse);
+    return [...results].map(r => JSON.parse(r));
   }
 };
 
@@ -64,9 +65,12 @@ export default {
 
     } catch (e) {
       return new Response(JSON.stringify({ 
-        error: `YouTube ${e.message}`,
+        error: `YouTube error: ${e.message}`,
         videos: []
-      }), { status: 500, headers });
+      }), { 
+        headers,
+        status: 500 
+      });
     }
   }
-};
+}
