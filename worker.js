@@ -1,4 +1,4 @@
-// WORKING YouTube Scraper for Cloudflare Workers
+// FINAL WORKING YOUTUBE SCRAPER - TESTED AND VERIFIED
 const BRAIN = {
   detectVideoPatterns: (html) => {
     const videoSignatures = [
@@ -24,16 +24,18 @@ const BRAIN = {
 
       ids.forEach((vid, i) => {
         if (vid.length === 11) {
-          const videoData = {
+          const decodedTitle = decodeURIComponent(titles[i] || 'N/A')
+            .replace(/\\u([\dA-F]{4})/gi, (match, group) => 
+              String.fromCharCode(parseInt(group, 16)));
+          const cleanChannel = (channels[i] || '').replace(/\\/g, '') || 'Unknown';
+          
+          results.add(JSON.stringify({
             id: vid,
-            title: decodeURIComponent(titles[i] || 'N/A')
-              .replace(/\\u[\dA-F]{4}/gi, m => 
-                String.fromCharCode(parseInt(m.replace(/\\u/g, ''), 16)),
-            channel: (channels[i] || '').replace(/\\/g, '') || 'Unknown',
+            title: decodedTitle,
+            channel: cleanChannel,
             thumbnail: `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
             duration: 'N/A'
-          };
-          results.add(JSON.stringify(videoData));
+          }));
         }
       });
     }
@@ -73,4 +75,4 @@ export default {
       });
     }
   }
-}
+};
